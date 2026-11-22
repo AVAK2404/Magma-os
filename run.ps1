@@ -1,22 +1,25 @@
-﻿# QEMU 11.1.0 UEFI + TCG launch script for Magma OS
-# Requires: QEMU 11.1.0, OVMF UEFI firmware
+$ErrorActionPreference = "Stop"
 
- = "qemu-system-x86_64"
- = "OVMF_CODE.UEFI"
- = "OVMF_VARS.UEFI"
-
-# Build the kernel first
 cargo build
 
-# Run QEMU with Limine bootloader
-&  
-    -bios  
-    -drive if=pflash,format=raw,readonly=on,file= 
-    -drive if=pflash,format=raw,file= 
-    -drive format=fat,readonly=on,file=boot 
-    -m 512M 
-    -cpu qemu64 
-    -smp 1 
-    -no-reboot 
-    -serial stdio 
-    -display none
+$esp = "target\esp"
+New-Item -ItemType Directory -Force -Path "$esp\EFI\BOOT", "$esp\boot" | Out-Null
+
+Copy-Item "boot\limine\BOOTX64.EFI" "$esp\EFI\BOOT\BOOTX64.EFI" -Force
+Copy-Item "boot\limine.conf" "$esp\boot\limine.conf" -Force
+Copy-Item "target\x86_64-unknown-none\debug\magma_os" "$esp\boot\magma_os" -Force
+
+$codeFd = "C:\Program Files\qemu\share\edk2-x86_64-code.fd"
+$varsTemplate = "C:\Program Files\qemu\share\edk2-i386-vars.fd"
+$varsFd = "target\edk2-vars.fd"
+if (-not (Test-Path $varsFd)) {
+    Copy-Item $varsTemplate $varsFd
+}
+
+& "C:\Program Files\qemu\qemu-system-x86_64.exe" `
+    -accel tcg `
+    -m 256M `
+    -drive if=pflash,format=raw,readonly=on,file="$codeFd" `
+    -drive if=pflash,format=raw,file="$varsFd" `
+    -drive format=raw,file=fat:rw:$esp `
+    -serial stdio
