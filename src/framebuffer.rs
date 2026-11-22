@@ -88,16 +88,37 @@ impl Framebuffer {
     pub fn height(&self) -> usize {
         self.height
     }
-    
-    /// Draw a string at position (x, y)
-    pub fn draw_str(&self, x: usize, y: usize, s: &str, fg_color: u32) {
-        let mut current_x = x;
-        for c in s.chars() {
-            if let Some((bitmap, _)) = char_to_bitmap(c) {
-                draw_char_bitmap(self, current_x, y, bitmap, fg_color);
-                current_x += 8;
+
+    /// Draw a scaled character at position (x, y)
+    /// Each glyph bit renders as a scale x scale pixel block
+    /// Advances x by 8 * scale pixels per character
+    pub fn draw_char_scaled(&self, x: usize, y: usize, c: char, fg: u32, bg: u32, scale: usize) {
+        if scale == 0 { return; }
+        if let Some((bitmap, _)) = char_to_bitmap(c) {
+            for row in 0..8 {
+                for bit in 0..8 {
+                    let pixel_color = if (bitmap[row] >> bit) & 1 != 0 { fg } else { bg };
+                    let px = x + bit * scale;
+                    let py = y + row * scale;
+                    self.fill_rect(px, py, scale, scale, pixel_color);
+                }
             }
         }
+    }
+
+    /// Draw a scaled string at position (x, y)
+    /// Each character advances x by 8 * scale pixels
+    pub fn draw_str_scaled(&self, x: usize, y: usize, s: &str, fg: u32, bg: u32, scale: usize) {
+        let mut current_x = x;
+        for c in s.chars() {
+            self.draw_char_scaled(current_x, y, c, fg, bg, scale);
+            current_x += 8 * scale;
+        }
+    }
+
+    /// Draw a string at position (x, y)
+    pub fn draw_str(&self, x: usize, y: usize, s: &str, fg_color: u32) {
+        self.draw_str_scaled(x, y, s, fg_color, 0x000000, 1);
     }
 }
 
@@ -167,7 +188,7 @@ static FONT_8X8: [[u8; 8]; 95] = [
     [0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00], // ]
     [0x18, 0x3C, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00], // ^
     [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], // _
-    [0x18, 0x0C, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00], // 
+    [0x18, 0x0C, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00], //
     [0x00, 0x00, 0x3C, 0x66, 0x7E, 0x66, 0x66, 0x00], // a
     [0x66, 0x66, 0x3C, 0x66, 0x66, 0x66, 0x3C, 0x00], // b
     [0x00, 0x00, 0x3C, 0x66, 0x00, 0x66, 0x3C, 0x00], // c
@@ -211,6 +232,7 @@ fn char_to_bitmap(c: char) -> Option<(&'static [u8; 8], usize)> {
 }
 
 /// Internal function to draw a bitmap character
+#[allow(dead_code)]
 fn draw_char_bitmap(fb: &Framebuffer, x: usize, y: usize, bitmap: &[u8; 8], color: u32) {
     for (row, &byte) in bitmap.iter().enumerate() {
         for bit in 0..8 {

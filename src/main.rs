@@ -146,24 +146,25 @@ pub extern "C" fn _start() -> ! {
             fb.clear(clear_color);
         }
         
-        // Draw header bar
+        // Draw header bar (64 pixels tall)
         let header_color: u32 = 0xE85D04;
         if let Some(fb) = framebuffer::FRAMEBUFFER.get() {
-            fb.fill_rect(0, 0, width, 32, header_color);
+            fb.fill_rect(0, 0, width, 64, header_color);
         }
-        
+
         // Draw boot screen text
         let text_color: u32 = 0xFFFFFF;
         if let Some(fb) = framebuffer::FRAMEBUFFER.get() {
-            // Render "MAGMA OS"
-            fb.draw_str(10, 64, "MAGMA OS", text_color);
-            // Render "Kernel Initialised | x86_64 | Limine"
-            fb.draw_str(10, 96, "Kernel Initialised | x86_64 | Limine", text_color);
-            // Render "Usable RAM: <X> MiB"
+            // Render "MAGMA OS" at scale=3, starting at y=16 (centered in 64px header)
+            let magma_y: usize = 16;
+            fb.draw_str_scaled(16, magma_y, "MAGMA OS", text_color, 0x000000, 3);
+            // Render "Kernel Initialised | x86_64 | Limine" at scale=2
+            fb.draw_str_scaled(10, 144, "Kernel Initialised | x86_64 | Limine", text_color, 0x000000, 2);
+            // Render "Usable RAM: <X> MiB" at scale=2
             let ram_str = format!("Usable RAM: {} MiB", total_usable / (1024 * 1024));
-            fb.draw_str(10, 128, &ram_str, text_color);
-            // Render "Status: RUNNING"
-            fb.draw_str(10, 160, "Status: RUNNING", text_color);
+            fb.draw_str_scaled(10, 216, &ram_str, text_color, 0x000000, 2);
+            // Render "Status: RUNNING" at scale=2
+            fb.draw_str_scaled(10, 288, "Status: RUNNING", text_color, 0x000000, 2);
         }
     }
 
@@ -195,7 +196,7 @@ pub extern "C" fn _start() -> ! {
     if let Some(entry) = fb_entry {
         if let Some(fb) = framebuffer::FRAMEBUFFER.get() {
             let text_color: u32 = 0xFFFFFF;
-            fb.draw_str(10, 192, "Interrupts: IDT + 100Hz PIT ACTIVE", text_color);
+            fb.draw_str_scaled(10, 360, "Interrupts: IDT + 100Hz PIT ACTIVE", text_color, 0x000000, 2);
         }
     }
 
