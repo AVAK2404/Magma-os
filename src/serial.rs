@@ -1,4 +1,4 @@
-use core::arch::asm;
+﻿use core::arch::asm;
 use core::fmt::{self, Write};
 
 const COM1: u16 = 0x3F8;

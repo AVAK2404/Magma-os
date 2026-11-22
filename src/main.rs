@@ -1,9 +1,13 @@
 ﻿#![no_std]
 #![no_main]
+#![feature(abi_x86_interrupt)]
+#![feature(naked_functions_rustic_abi)]
 
 extern crate alloc;
 
 mod framebuffer;
+mod gdt;
+mod interrupts;
 mod panic;
 mod serial;
 
@@ -163,13 +167,45 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // Phase 1C: GDT, TSS, IDT, PIC, PIT
+    gdt::init();
+    serial_println!("[OK] GDT & TSS loaded");
+
+    interrupts::init();
+    serial_println!("[OK] IDT, PIC (32..47), and 100Hz PIT enabled");
+
+    // Test breakpoint exception (#BP, vector 3)
+    unsafe {
+        core::arch::asm!("int3", options(nomem, nostack));
+    }
+    serial_println!("[OK] Breakpoint (#BP) caught and recovered");
+
+    // Wait for timer ticks (25 ticks = 250ms at 100Hz)
+    while interrupts::ticks() < 25 {
+        unsafe {
+            asm!("hlt", options(nomem, nostack, preserves_flags));
+        }
+    }
+    
+    let tick_count = interrupts::ticks();
+    serial_println!("[OK] Hardware timer verified: {} ticks", tick_count);
+    
+    // Render confirmation on framebuffer
+    let fb_entry = FRAMEBUFFER_REQUEST.response().and_then(|r| r.framebuffers().first());
+    if let Some(entry) = fb_entry {
+        if let Some(fb) = framebuffer::FRAMEBUFFER.get() {
+            let text_color: u32 = 0xFFFFFF;
+            fb.draw_str(10, 192, "Interrupts: IDT + 100Hz PIT ACTIVE", text_color);
+        }
+    }
+
     halt();
 }
 
 fn halt() -> ! {
     loop {
         unsafe {
-            asm!("cli; hlt", options(nomem, nostack));
+            asm!("hlt", options(nomem, nostack, preserves_flags));
         }
     }
 }
