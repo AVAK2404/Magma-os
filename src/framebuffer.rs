@@ -27,7 +27,7 @@ impl Framebuffer {
     }
 
     /// Calculate pixel address at (x, y)
-    fn pixel_addr(&self, x: usize, y: usize) -> *mut u32 {
+    pub fn pixel_addr(&self, x: usize, y: usize) -> *mut u32 {
         if x >= self.width || y >= self.height {
             return core::ptr::null_mut();
         }
@@ -119,6 +119,76 @@ impl Framebuffer {
     /// Draw a string at position (x, y)
     pub fn draw_str(&self, x: usize, y: usize, s: &str, fg_color: u32) {
         self.draw_str_scaled(x, y, s, fg_color, 0x000000, 1);
+    }
+
+    /// Blend a source color with destination using alpha (0-255)
+    /// Result = src * (alpha/255) + dst * (1 - alpha/255)
+    /// All colors are ARGB format, but we extract RGB components
+    fn blend_alpha(dst: u32, src: u32, alpha: u8) -> u32 {
+        if alpha == 255 {
+            return src;
+        }
+        if alpha == 0 {
+            return dst;
+        }
+
+        let src_rgb = src;
+        let dst_rgb = dst;
+
+        // Extract RGB components
+        let src_r = (src_rgb >> 16) & 0xFF;
+        let src_g = (src_rgb >> 8) & 0xFF;
+        let src_b = src_rgb & 0xFF;
+
+        let dst_r = (dst_rgb >> 16) & 0xFF;
+        let dst_g = (dst_rgb >> 8) & 0xFF;
+        let dst_b = dst_rgb & 0xFF;
+
+        // Alpha blending: result = src * alpha + dst * (255 - alpha)
+        let inv_alpha = 255 - alpha as u16;
+        let alpha = alpha as u16;
+
+        let r = ((src_r as u16 * alpha + dst_r as u16 * inv_alpha) / 255) as u32;
+        let g = ((src_g as u16 * alpha + dst_g as u16 * inv_alpha) / 255) as u32;
+        let b = ((src_b as u16 * alpha + dst_b as u16 * inv_alpha) / 255) as u32;
+
+        (r << 16) | (g << 8) | b
+    }
+
+    /// Blit a 32x32 sprite with alpha blending to the framebuffer
+    /// This is used for the Magma Core emblem in the boot splash
+    pub fn blit_alpha(&self, x: usize, y: usize, sprite: &[[u32; 32]; 32], alpha_mask: &[u8; 32]) {
+        for row in 0..32 {
+            for col in 0..32 {
+                let pixel = self.pixel_addr(x + col, y + row);
+                if !pixel.is_null() {
+                    let sprite_color = sprite[row][col];
+                    // Use alpha from mask (0 = fully transparent, 255 = fully opaque)
+                    let a = alpha_mask[row];
+                    let current = unsafe { core::ptr::read(pixel) };
+                    let blended = Self::blend_alpha(current, sprite_color, a);
+                    unsafe { core::ptr::write(pixel, blended); }
+                }
+            }
+        }
+    }
+
+    /// Blit a sprite of arbitrary size with alpha blending
+    pub fn blit_alpha_sprite(&self, x: usize, y: usize, sprite: &[[u32; 64]; 64], width: usize, height: usize) {
+        for row in 0..height {
+            for col in 0..width {
+                let pixel = self.pixel_addr(x + col, y + row);
+                if !pixel.is_null() {
+                    let sprite_color = sprite[row][col];
+                    // Extract alpha from ARGB format (top byte)
+                    let a = ((sprite_color >> 24) & 0xFF) as u8;
+                    let rgb = sprite_color & 0x00FFFFFF;
+                    let current = unsafe { core::ptr::read(pixel) };
+                    let blended = Self::blend_alpha(current, rgb, a);
+                    unsafe { core::ptr::write(pixel, blended); }
+                }
+            }
+        }
     }
 }
 

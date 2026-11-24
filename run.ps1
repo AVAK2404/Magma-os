@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 cargo build
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 $esp = "target\esp"
 New-Item -ItemType Directory -Force -Path "$esp\EFI\BOOT", "$esp\boot" | Out-Null
@@ -19,6 +20,8 @@ if (-not (Test-Path $varsFd)) {
 & "C:\Program Files\qemu\qemu-system-x86_64.exe" `
     -accel tcg `
     -m 256M `
+    -no-reboot `
+    -d int,cpu_reset -D qemu_fault.log `
     -drive if=pflash,format=raw,readonly=on,file="$codeFd" `
     -drive if=pflash,format=raw,file="$varsFd" `
     -drive format=raw,file=fat:rw:$esp `

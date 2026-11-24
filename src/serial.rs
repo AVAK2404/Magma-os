@@ -1,18 +1,31 @@
-﻿use core::arch::asm;
+﻿//! Serial port driver for debug output
+//! Provides both allocation-based printing (serial_println!) and
+//! panic-safe printing for exception handlers (serial_print_safe)
+
 use core::fmt::{self, Write};
 
 const COM1: u16 = 0x3F8;
 
-unsafe fn outb(port: u16, val: u8) {
-    unsafe {
-        asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags));
+/// Write a string to serial without any allocation or formatting
+/// Safe to use in exception handlers, panic handlers, and interrupt context
+pub fn write_str_safe(s: &str) {
+    for byte in s.bytes() {
+        write_byte(byte);
     }
 }
 
+#[inline]
+unsafe fn outb(port: u16, val: u8) {
+    unsafe {
+        core::arch::asm!("out dx, al", in("dx") port, in("al") val, options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[inline]
 unsafe fn inb(port: u16) -> u8 {
     let val: u8;
     unsafe {
-        asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack, preserves_flags));
+        core::arch::asm!("in al, dx", out("al") val, in("dx") port, options(nomem, nostack, preserves_flags));
     }
     val
 }
@@ -34,9 +47,6 @@ fn is_transmit_empty() -> bool {
 }
 
 pub fn write_byte(byte: u8) {
-    if byte == b'\n' {
-        write_byte(b'\r');
-    }
     while !is_transmit_empty() {
         core::hint::spin_loop();
     }
@@ -46,6 +56,15 @@ pub fn write_byte(byte: u8) {
 }
 
 pub struct SerialPort;
+
+impl SerialPort {
+    pub fn write_str(&mut self, s: &str) -> fmt::Result {
+        for byte in s.bytes() {
+            write_byte(byte);
+        }
+        Ok(())
+    }
+}
 
 impl Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
@@ -68,6 +87,6 @@ macro_rules! serial_print {
 
 #[macro_export]
 macro_rules! serial_println {
-    () => ($crate::serial_print!("\n"));
-    ($($arg:tt)*) => ($crate::serial_print!("{}\n", format_args!($($arg)*)));
+    () => ($crate::serial_print!("\r\n"));
+    ($($arg:tt)*) => ($crate::serial_print!("{}\r\n", format_args!($($arg)*)));
 }
