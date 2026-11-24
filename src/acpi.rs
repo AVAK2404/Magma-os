@@ -275,6 +275,7 @@ impl AcpiData {
 
 /// Initialize ACPI subsystem
 /// Called after PMM and paging are initialized
+#[allow(static_mut_refs)]
 pub fn init(rsdp_addr: u64, hhdm_offset: u64) {
     // Store HHDM offset for phys_to_virt helper
     unsafe { HHDM_OFFSET = hhdm_offset; }
@@ -410,6 +411,7 @@ pub fn init(rsdp_addr: u64, hhdm_offset: u64) {
 }
 
 /// Print summary of parsed ACPI data
+#[allow(static_mut_refs)]
 fn print_acpi_summary() {
     unsafe {
         serial::write_str_safe("[ACPI] Summary: ");
@@ -913,6 +915,7 @@ fn write_u64_hex(mut val: u64) {
 }
 
 /// Write u16 as hex
+#[allow(dead_code)]
 fn write_u16_hex(mut val: u16) {
     if val == 0 {
         serial::write_str_safe("0");
@@ -936,16 +939,19 @@ fn write_u16_hex(mut val: u16) {
 // ============================================================================
 
 /// Get Local APIC base address from MADT
+#[allow(static_mut_refs)]
 pub fn lapic_base() -> u32 {
     unsafe { ACPI_DATA.madt_lapic_base }
 }
 
 /// Get I/O APIC count from MADT
+#[allow(static_mut_refs)]
 pub fn ioapic_count() -> u8 {
     unsafe { ACPI_DATA.madt_ioapic_count }
 }
 
 /// Get I/O APIC base addresses from MADT as a static slice
+#[allow(static_mut_refs)]
 pub fn ioapiics() -> &'static [u32] {
     unsafe {
         &ACPI_DATA.madt_ioapic_entries[..ACPI_DATA.madt_ioapic_count as usize]
@@ -953,6 +959,7 @@ pub fn ioapiics() -> &'static [u32] {
 }
 
 /// Get Interrupt Source Override entries from MADT as a static slice
+#[allow(static_mut_refs)]
 pub fn interrupt_overrides() -> &'static [IsoEntry] {
     unsafe {
         &ACPI_DATA.madt_isos[..ACPI_DATA.madt_iso_count as usize]

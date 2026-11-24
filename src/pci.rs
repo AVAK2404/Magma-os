@@ -436,6 +436,7 @@ fn decode_class_code(class_code: u32) -> (u8, u8, u8) {
 
 /// Initialize PCI enumeration
 /// Scans all buses, devices, and functions, storing discovered devices in static table
+#[allow(static_mut_refs)]
 pub fn init() {
     acquire_lock();
 
@@ -573,11 +574,13 @@ pub fn init() {
 }
 
 /// Get the number of discovered PCI devices
+#[allow(static_mut_refs)]
 pub fn device_count() -> usize {
     unsafe { PCI_COUNT }
 }
 
 /// Get an iterator over discovered devices (simplified version)
+#[allow(static_mut_refs)]
 pub fn devices() -> PciDeviceIterator {
     PciDeviceIterator {
         count: 0,
@@ -606,6 +609,7 @@ impl PciDeviceIterator {
 
 /// Find a PCI device by class and subclass
 /// Returns the first matching device, or None if not found
+#[allow(static_mut_refs)]
 pub fn find_by_class(class_code: u8, subclass: u8) -> Option<PciDevice> {
     acquire_lock();
     let result = find_by_class_inner(class_code, subclass);
@@ -614,6 +618,7 @@ pub fn find_by_class(class_code: u8, subclass: u8) -> Option<PciDevice> {
 }
 
 /// Internal implementation of find_by_class (assumes lock held)
+#[allow(static_mut_refs)]
 fn find_by_class_inner(class_code: u8, subclass: u8) -> Option<PciDevice> {
     unsafe {
         for i in 0..PCI_COUNT {

@@ -280,3 +280,5 @@ When a conflict exists between an assumed convenience, a proposed design, a road
 Do not treat your own recommendations as approval.
 
 **No autonomous implementation. No unapproved side effects. Human approval controls every change.**
+
+Note: _start, #[panic_handler], and extern "x86-interrupt" handlers (e.g., breakpoint_handler, page_fault_handler, timer_handler, keyboard IRQ handlers) are invoked by hardware/bootloader vectors, not Rust callers—never remove them as dead code.

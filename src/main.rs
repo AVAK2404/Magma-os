@@ -6,11 +6,13 @@
 extern crate alloc;
 
 mod acpi;
+mod ata;
 mod framebuffer;
 mod gdt;
 mod heap;
 mod interrupts;
 mod ioapic;
+mod keyboard;
 mod panic;
 mod paging;
 mod pmm;
@@ -28,6 +30,7 @@ use limine::request::MemmapRequest;
 use limine::request::RsdpRequest;
 
 // Import PCI helper functions for use in tests
+use pci::write_u8_hex;
 use pci::write_u16_hex;
 
 #[used]
@@ -142,7 +145,10 @@ pub extern "C" fn _start() -> ! {
 
         // Trace: About to map heap pages
         serial::write_str_safe("[TRACE] About to map heap pages\r\n");
-        heap::init().expect("Failed to map heap pages");
+        // Map 16 MiB kernel heap using 4 KiB pages (simpler for kernel heap)
+        let heap_flags = paging::PRESENT | paging::WRITABLE | paging::NO_EXECUTE;
+        paging::map_range(heap::HEAP_START, heap::HEAP_SIZE as u64, heap_flags)
+            .expect("Failed to map heap range");
         serial::write_str_safe("[OK] Heap pages mapped at 0x");
         print_u64_hex(heap::HEAP_START);
         serial::write_str_safe("\r\n");
@@ -210,9 +216,30 @@ pub extern "C" fn _start() -> ! {
         serial::write_str_safe("[TRACE] About to initialize I/O APIC...\r\n");
         ioapic::init();
 
+        // Initialize PS/2 Keyboard driver
+        keyboard::init();
+        ioapic::route_isa_irq(1, 33, 0);
+        serial::write_str_safe("[OK] PS/2 Keyboard routed via I/O APIC (IRQ1 -> vec 33)\r\n");
+
         // Initialize Local APIC timer at 100 Hz (same as PIT for consistency)
         interrupts::init_lapic_timer(100);
         serial::write_str_safe("[OK] Local APIC timer calibrated at 100 Hz\r\n");
+    }
+
+    // ============================================
+    // Phase 1F: ATA Boot Verification
+    // ============================================
+
+    serial::write_str_safe("[TRACE] Initializing ATA driver...\r\n");
+    if let Ok(()) = ata::init() {
+        if ata::is_present() {
+            if let Some(info) = ata::get_drive_info() {
+                // Print drive info
+                serial::write_str_safe("[OK] ATA Primary Master ready, LBA0 sig=0x");
+                write_u16_hex(info.lba0_signature);
+                serial::write_str_safe("\r\n");
+            }
+        }
     }
 
     // Test breakpoint exception (#BP, vector 3)
@@ -296,7 +323,9 @@ pub extern "C" fn _start() -> ! {
     // Test 3: 2 MiB huge page mapping, read/write, unmapping
     serial::write_str_safe("[TEST] 3. 2 MiB huge page mapping...\r\n");
     // Allocate 2MB (512 frames) for the huge page content with 2MB alignment
-    if let Some(huge_dma) = pmm::alloc_contiguous_frames(512, 512) {
+    // 2 MiB = 2 * 1024 * 1024 bytes, which equals 512 frames of 4 KiB each
+    let align_2mb: u64 = 2 * 1024 * 1024;
+    if let Some(huge_dma) = pmm::alloc_contiguous_frames(512, align_2mb) {
         // Use a dedicated 2 MiB-aligned virtual address for testing
         // This avoids unmapping the HHDM-mapped huge_dma.virt_addr
         let huge_virt: u64 = 0xFFFF_C000_0200_0000;
@@ -385,10 +414,22 @@ pub extern "C" fn _start() -> ! {
         fb.draw_str_scaled(10, 568, "APIC: IDT + ExtINT IRQ0 + Timer(100Hz)", text_color, 0x000000, 2);
     }
 
-    serial::write_str_safe("[TRACE] Entering halt loop\r\n");
+    // Initialize ATA driver for disk commands
+    let _ata_present = ata::init().is_ok();
 
-    // Should never reach here, but halt just in case
-    halt()
+    // Verify boot sector signature at LBA 0
+    if ata::is_present() {
+        if ata::verify_boot_signature() {
+            serial::write_str_safe("[ATA] Boot sector verified: signature 0x55AA found at LBA 0\r\n");
+        } else {
+            serial::write_str_safe("[ATA] Boot sector check: no valid signature at LBA 0 (may be empty)\r\n");
+        }
+    }
+
+    // Enter interactive command loop
+    serial::write_str_safe("\r\n=== Magma OS Interactive Shell ===\r\n");
+    serial::write_str_safe("Type 'help' for available commands.\r\n");
+    interactive_loop();
 }
 
 /// Helper to print u64 as decimal
@@ -438,4 +479,260 @@ fn halt() -> ! {
             asm!("hlt", options(nomem, nostack, preserves_flags));
         }
     }
+}
+
+/// Read a line from input (keyboard + serial)
+/// Supports dual input capability: reads from both PS/2 keyboard and COM1 serial port
+fn read_line() -> alloc::vec::Vec<u8> {
+    let mut line: alloc::vec::Vec<u8> = alloc::vec![];
+    let mut done = false;
+    loop {
+        // Poll keyboard for input
+        if let Some(key) = keyboard::pop_event() {
+            done = handle_input_char(key.ch, &mut line);
+        }
+
+        // Poll serial port for input (non-blocking)
+        if let Some(byte) = serial::try_read_byte() {
+            done = handle_input_char(byte, &mut line);
+        }
+
+        if done {
+            break;
+        }
+
+        unsafe {
+            asm!("hlt", options(nomem, nostack, preserves_flags));
+        }
+    }
+    line
+}
+
+/// Handle a single input character (from keyboard or serial)
+/// Updates line buffer and echoes to serial output
+/// Returns true if end of line was reached
+fn handle_input_char(ch: u8, line: &mut alloc::vec::Vec<u8>) -> bool {
+    if ch == b'\r' || ch == b'\n' {
+        // End of line - print newline and signal done
+        serial::write_str_safe("\r\n");
+        true
+    } else if ch == 0x7F || ch == b'\x08' {
+        // Backspace
+        if let Some(_) = line.pop() {
+            serial::write_byte(b'\x08');  // Move cursor back
+            serial::write_byte(b' ');   // Erase
+            serial::write_byte(b'\x08');  // Move cursor back again
+        }
+        false
+    } else if ch >= 32 {
+        // Printable character
+        line.push(ch);
+        serial::write_byte(ch);
+        false
+    } else {
+        // Ignore other control characters
+        false
+    }
+}
+
+/// Trim whitespace from a byte vector
+fn trim_bytes(line: &[u8]) -> &[u8] {
+    let start = line.iter().position(|&b| b != b' ' && b != b'\t').unwrap_or(line.len());
+    let end = line.iter().rposition(|&b| b != b' ' && b != b'\t').map(|i| i + 1).unwrap_or(0);
+    if start >= end { &[] } else { &line[start..end] }
+}
+
+/// Check if a line starts with a given string
+fn starts_with(line: &[u8], prefix: &[u8]) -> bool {
+    line.len() >= prefix.len() && &line[..prefix.len()] == prefix
+}
+
+/// Print help text
+fn print_help() {
+    serial::write_str_safe("\r\nAvailable commands:\r\n");
+    serial::write_str_safe("  help    - Show this help message\r\n");
+    serial::write_str_safe("  mem     - Show memory statistics (PMM, heap)\r\n");
+    serial::write_str_safe("  pci     - List PCI devices\r\n");
+    serial::write_str_safe("  ticks   - Show timer tick count\r\n");
+    serial::write_str_safe("  disk    - List detected IDE devices\r\n");
+    serial::write_str_safe("\r\n");
+}
+
+/// Show memory statistics
+fn cmd_mem() {
+    let (free_frames, total_frames) = pmm::stats();
+    serial::write_str_safe("\r\nMemory Statistics:\r\n");
+    serial::write_str_safe("  Free frames: ");
+    print_u64(free_frames as u64);
+    serial::write_str_safe("\r\n");
+    serial::write_str_safe("  Total frames: ");
+    print_u64(total_frames as u64);
+    serial::write_str_safe("\r\n");
+
+    let free_mb = (free_frames as u64 * 4096) / (1024 * 1024);
+    let total_mb = (total_frames as u64 * 4096) / (1024 * 1024);
+    serial::write_str_safe("  Free RAM: ");
+    print_u64(free_mb);
+    serial::write_str_safe(" MiB\r\n");
+    serial::write_str_safe("  Total RAM: ");
+    print_u64(total_mb);
+    serial::write_str_safe(" MiB\r\n");
+}
+
+/// List PCI devices
+fn cmd_pci() {
+    let count = pci::device_count();
+    serial::write_str_safe("\r\nPCI Devices (");
+    print_u64(count as u64);
+    serial::write_str_safe(" found):\r\n");
+
+    let mut iter = pci::devices();
+    while let Some(dev) = iter.next() {
+        serial::write_str_safe("  ");
+        write_u16_hex(dev.vendor_id);
+        serial::write_str_safe(":");
+        write_u16_hex(dev.device_id);
+        serial::write_str_safe(" bus:");
+        write_u8_hex(dev.bus);
+        serial::write_str_safe(".");
+        write_u8_hex(dev.device);
+        serial::write_str_safe(".");
+        write_u8_hex(dev.function);
+
+        // Decode class code
+        let (class, subclass, prog_if) = {
+            let base = ((dev.class_code >> 16) & 0xFF) as u8;
+            let sub = ((dev.class_code >> 8) & 0xFF) as u8;
+            let prog = (dev.class_code & 0xFF) as u8;
+            (base, sub, prog)
+        };
+        serial::write_str_safe(" class=");
+        write_u8_hex(class);
+        serial::write_str_safe("/");
+        write_u8_hex(subclass);
+        serial::write_str_safe("/");
+        write_u8_hex(prog_if);
+
+        if dev.interrupt_line != 0 {
+            serial::write_str_safe(" INT=");
+            print_u64(dev.interrupt_line as u64);
+        }
+        serial::write_str_safe("\r\n");
+    }
+}
+
+/// Show timer tick count
+fn cmd_ticks() {
+    let ticks = interrupts::ticks();
+    serial::write_str_safe("\r\nTimer ticks: ");
+    print_u64(ticks);
+    serial::write_str_safe("\r\n");
+}
+
+/// List disk/IDE devices
+fn cmd_disk() {
+    serial::write_str_safe("\r\nIDE Storage Devices:\r\n");
+    if ata::is_present() {
+        serial::write_str_safe("  Controller: Primary IDE at I/O 0x");
+        write_u16_hex(ata::io_base());
+        serial::write_str_safe("\r\n");
+
+        if let Some(info) = ata::get_drive_info() {
+            // Print model string
+            serial::write_str_safe("  Model: \"");
+            for &b in &info.model {
+                if b == 0 {
+                    break;
+                }
+                serial::write_byte(b);
+            }
+            serial::write_str_safe("\"\r\n");
+
+            // Print serial if present
+            let has_serial = info.serial.iter().any(|&b| b != 0);
+            if has_serial {
+                serial::write_str_safe("  Serial: ");
+                for &b in &info.serial {
+                    if b == 0 {
+                        break;
+                    }
+                    serial::write_byte(b);
+                }
+                serial::write_str_safe("\r\n");
+            }
+
+            // Print capacity
+            serial::write_str_safe("  Capacity: ");
+            let mb = (info.max_lba as u64 * 512) / (1024 * 1024);
+            let mut tmp = mb;
+            let mut buf = [0u8; 20];
+            let mut idx = 19;
+            if tmp == 0 {
+                buf[19] = b'0';
+                idx = 19;
+            } else {
+                while tmp > 0 {
+                    buf[idx] = b'0' + ((tmp % 10) as u8);
+                    tmp /= 10;
+                    idx -= 1;
+                }
+                idx += 1;
+            }
+            for &b in &buf[idx..=19] {
+                serial::write_byte(b);
+            }
+            serial::write_str_safe(" MB");
+            serial::write_str_safe("\r\n");
+
+            // Print boot signature status
+            serial::write_str_safe("  LBA 0 Signature: 0x");
+            write_u16_hex(info.lba0_signature);
+            if info.lba0_signature == 0x55AA {
+                serial::write_str_safe(" (bootable)\r\n");
+            } else {
+                serial::write_str_safe("\r\n");
+            }
+        }
+    } else {
+        serial::write_str_safe("  No IDE controller detected\r\n");
+    }
+}
+
+/// Interactive command loop
+fn interactive_loop() -> ! {
+    loop {
+        serial::write_str_safe("\r\n> ");
+
+        let line = read_line();
+        let trimmed = trim_bytes(&line);
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        // Process commands
+        if starts_with(trimmed, b"help") {
+            print_help();
+        } else if starts_with(trimmed, b"mem") {
+            cmd_mem();
+        } else if starts_with(trimmed, b"pci") {
+            cmd_pci();
+        } else if starts_with(trimmed, b"ticks") {
+            cmd_ticks();
+        } else if starts_with(trimmed, b"disk") {
+            cmd_disk();
+        } else if starts_with(trimmed, b"exit") || starts_with(trimmed, b"quit") {
+            serial::write_str_safe("Goodbye.\r\n");
+            break;
+        } else {
+            serial::write_str_safe("\r\nUnknown command: '");
+            for &b in trimmed {
+                serial::write_byte(b);
+            }
+            serial::write_str_safe("'. Type 'help' for available commands.\r\n");
+        }
+    }
+
+    // Halt after exit
+    halt();
 }

@@ -185,43 +185,40 @@ pub fn map_huge_page(virt_addr: u64, phys_addr: u64, flags: u64) -> Result<(), &
     unsafe {
         let pml4 = core::slice::from_raw_parts_mut(pml4_virt as *mut u64, 512);
 
-        // Get or create PDPT
+        // 1. Get or create PDPT
         let pdpt_phys = if (pml4[pml4_index] & PRESENT) != 0 {
             pml4[pml4_index] & ADDR_MASK
         } else {
             let new_frame = pmm::alloc_frame().ok_or("Failed to allocate PDPT frame")?;
-            pml4[pml4_index] = new_frame | PRESENT | WRITABLE | USER;
+            pml4[pml4_index] = new_frame | PRESENT | WRITABLE | NO_EXECUTE;
             new_frame
         };
         let pdpt_virt = hhdm + pdpt_phys;
         let pdpt = core::slice::from_raw_parts_mut(pdpt_virt as *mut u64, 512);
 
-        // Get or create PD - but for huge page, we write directly here
+        // 2. Check if PDPT entry is already mapped (might be a PD table or 1 GiB huge page)
         if (pdpt[pdpt_index] & PRESENT) != 0 {
-            // PD already exists, check if it's a 1 GiB huge page (conflict) or 2 MiB page
+            // If it's a 1 GiB huge page, we can't map a 2 MiB page at this level
             if (pdpt[pdpt_index] & HUGE_PAGE) != 0 {
-                // 1 GiB page already present at this 2 MiB address - conflict
-                return Err("1 GiB huge page conflict - cannot map 2 MiB page");
+                return Err("PDPT entry is already a 1 GiB huge page");
             }
-            // It's a regular PD entry - extract physical address
-            let pd_phys = pdpt[pdpt_index] & ADDR_MASK;
-            let pd_virt = hhdm + pd_phys;
-            let pd = core::slice::from_raw_parts_mut(pd_virt as *mut u64, 512);
-
-            // Set 2 MiB huge page entry in PD
-            pd[pd_index] = (phys_addr & ADDR_MASK) | flags | PRESENT | HUGE_PAGE;
-            invlpg(virt_addr);
+            // PDPT entry points to a PD table - use the existing one
         } else {
-            // PD doesn't exist - allocate and set huge page entry in one step
-            let pd_phys = pmm::alloc_frame().ok_or("Failed to allocate PD frame")?;
-            pdpt[pdpt_index] = pd_phys | PRESENT | WRITABLE | USER;
-            let pd_virt = hhdm + pd_phys;
-            let pd = core::slice::from_raw_parts_mut(pd_virt as *mut u64, 512);
-
-            // Set huge page entry in PD
-            pd[pd_index] = (phys_addr & ADDR_MASK) | flags | PRESENT | HUGE_PAGE;
-            invlpg(virt_addr);
+            // Allocate new PD table
+            let new_frame = pmm::alloc_frame().ok_or("Failed to allocate PD frame")?;
+            pdpt[pdpt_index] = new_frame | PRESENT | WRITABLE | NO_EXECUTE;
         }
+
+        // 3. Get PD physical address (extract from PDPT entry)
+        let pd_phys = pdpt[pdpt_index] & ADDR_MASK;
+        let pd_virt = hhdm + pd_phys;
+        let pd = core::slice::from_raw_parts_mut(pd_virt as *mut u64, 512);
+
+        // 4. Set 2 MiB huge page entry in PD
+        pd[pd_index] = (phys_addr & ADDR_MASK) | flags | PRESENT | HUGE_PAGE;
+
+        // 5. Invalidate TLB
+        invlpg(virt_addr);
 
         Ok(())
     }

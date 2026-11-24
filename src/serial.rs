@@ -55,6 +55,21 @@ pub fn write_byte(byte: u8) {
     }
 }
 
+/// Check if a byte is available to read from serial port (non-blocking)
+/// Returns Some(byte) if data is available, None otherwise
+pub fn try_read_byte() -> Option<u8> {
+    // Line Status Register (COM1 + 5 = 0x3FD)
+    // Bit 0 = Data Ready (0 = no data, 1 = data available in receiver buffer)
+    let lsr = unsafe { inb(COM1 + 5) };
+
+    if lsr & 0x01 != 0 {
+        // Data ready - read from Receiver Buffer (COM1 = 0x3F8)
+        Some(unsafe { inb(COM1) })
+    } else {
+        None
+    }
+}
+
 pub struct SerialPort;
 
 impl SerialPort {

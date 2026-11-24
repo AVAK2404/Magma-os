@@ -148,6 +148,7 @@ struct GdtPointer {
 static mut IST_STACK: [u8; IST_STACK_SIZE] = [0u8; IST_STACK_SIZE];
 
 /// Initialize the GDT with all required segments and TSS
+#[allow(static_mut_refs)]
 pub fn init() {
     unsafe {
         // Set up IST stack pointer for double fault handler

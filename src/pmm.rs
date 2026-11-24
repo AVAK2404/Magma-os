@@ -405,11 +405,23 @@ pub fn region_type_at(phys_addr: u64) -> Option<RegionType> {
     None
 }
 
-/// Allocate contiguous frames with optional alignment
+/// Allocate contiguous frames with optional byte alignment
 /// Returns a DmaRegion with phys_addr, virt_addr, and frame_count
-/// `align_frames` must be a power of 2, defaults to 1 (no alignment beyond frame boundary)
+/// `align_bytes` must be a power of 2, defaults to PAGE_SIZE (4 KiB) if 0
 #[allow(dead_code)]
-pub fn alloc_contiguous_frames(count: usize, align_frames: usize) -> Option<DmaRegion> {
+pub fn alloc_contiguous_frames(count: usize, align_bytes: u64) -> Option<DmaRegion> {
+    // If align_bytes is 0, use PAGE_SIZE as default
+    let align = if align_bytes == 0 { PAGE_SIZE } else { align_bytes };
+
+    // Convert byte alignment to frame alignment
+    // For 2 MiB alignment (2 * 1024 * 1024), we need 512 frames
+    let align_frames = (align / PAGE_SIZE) as usize;
+
+    allocate_aligned_contiguous(count, align_frames)
+}
+
+/// Internal function to allocate contiguous frames with frame-level alignment
+fn allocate_aligned_contiguous(count: usize, align_frames: usize) -> Option<DmaRegion> {
     unsafe {
         let mut state = BITMAP_STATE.lock();
 
@@ -417,15 +429,7 @@ pub fn alloc_contiguous_frames(count: usize, align_frames: usize) -> Option<DmaR
             return None;
         }
 
-        // Ensure alignment is power of 2 and at least 1
-        let align = if align_frames > 0 {
-            let aligned = align_frames.next_power_of_two();
-            if aligned > count { aligned } else { align_frames.next_power_of_two().max(1) }
-        } else {
-            1
-        };
-
-        // Search for contiguous free frames
+        // Search for contiguous free frames that satisfy alignment
         let mut consecutive_free = 0usize;
         let mut candidate_start: Option<usize> = None;
 
@@ -452,14 +456,12 @@ pub fn alloc_contiguous_frames(count: usize, align_frames: usize) -> Option<DmaR
                         let start_frame = candidate_start.unwrap();
 
                         // Align start to align_frames if needed
-                        if align > 1 && start_frame % align != 0 {
-                            // Try to find aligned region within the contiguous block
-                            // Calculate how many frames we need after alignment
-                            let misaligned_start = start_frame % align;
-                            let aligned_start = start_frame + (align - misaligned_start);
+                        if align_frames > 1 && start_frame % align_frames != 0 {
+                            // Calculate aligned start within this region
+                            let misaligned_offset = start_frame % align_frames;
+                            let aligned_start = start_frame + (align_frames - misaligned_offset);
 
                             // Check if we have enough frames after alignment
-                            // We need count frames starting at aligned_start
                             if aligned_start + count <= start_frame + consecutive_free {
                                 // Use aligned version - mark exactly 'count' frames
                                 if mark_frames_allocated(&mut state, aligned_start, aligned_start + count) {
@@ -474,8 +476,8 @@ pub fn alloc_contiguous_frames(count: usize, align_frames: usize) -> Option<DmaR
                             }
                         }
 
-                        // No alignment needed or alignment failed within this region
-                        // Mark exactly 'count' frames starting at start_frame
+                        // No alignment needed or alignment couldn't be satisfied within this region
+                        // Fall back to using the un-aligned region
                         if mark_frames_allocated(&mut state, start_frame, start_frame + count) {
                             let phys_addr = (start_frame as u64) * PAGE_SIZE;
                             let virt_addr = phys_addr + state.hhdm_offset;

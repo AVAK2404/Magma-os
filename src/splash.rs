@@ -214,6 +214,7 @@ pub fn set_progress(percent: u32) {
 }
 
 /// Update progress based on phase
+#[allow(static_mut_refs)]
 pub fn set_phase(phase: u8, _label: &[u8]) {
     unsafe {
         PROGRESS = phase;

@@ -1,3 +1,7 @@
 ﻿/target/
-/boot/limine/
-*.rs.bk
+/graphify-out/
+*.iso
+*.img
+*.efi
+*.fd
+temp_*.rs

@@ -17,6 +17,7 @@ use core::sync::atomic::AtomicU64;
 static mut HHDM_OFFSET: u64 = 0;
 
 /// Set the HHDM offset (called once during initialization)
+#[allow(static_mut_refs)]
 pub fn set_hhdm_offset(offset: u64) {
     unsafe { HHDM_OFFSET = offset; }
 }
@@ -200,6 +201,7 @@ fn send_eoi(interrupt_id: u8) {
 /// Local APIC is at physical address 0xFEE00000
 /// Uses byte offsets for correct MMIO access
 #[inline]
+#[allow(static_mut_refs)]
 fn apic_read(offset: u64) -> u32 {
     unsafe {
         let hhdm = HHDM_OFFSET;
@@ -211,6 +213,7 @@ fn apic_read(offset: u64) -> u32 {
 /// Write Local APIC register via MMIO using HHDM offset
 /// Uses byte offsets for correct MMIO access
 #[inline]
+#[allow(static_mut_refs)]
 fn apic_write(offset: u64, value: u32) {
     unsafe {
         let hhdm = HHDM_OFFSET;
@@ -348,6 +351,15 @@ pub extern "x86-interrupt" fn timer_handler(_stack_frame: InterruptStackFrame) {
     send_eoi(0); // Send EOI to master PIC (0x20 port)
 }
 
+/// Keyboard interrupt handler (IRQ 1, vector 33)
+/// Reads scancode, handles keyboard, and sends EOI to LAPIC
+#[unsafe(no_mangle)]
+pub extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame) {
+    crate::keyboard::handle_irq();
+    // Write EOI to Local APIC (EOI is at offset 0xB0)
+    apic_write(0xB0, 0);
+}
+
 /// Local APIC Timer interrupt handler (vector 240 / 0xF0)
 /// Called by LAPIC timer configured via init_lapic_timer()
 #[unsafe(no_mangle)]
@@ -449,6 +461,7 @@ fn init_pit() {
 // ============================================================================
 
 /// Initialize the IDT with all required handlers
+#[allow(static_mut_refs)]
 pub fn init() {
     unsafe {
         let idt_base = &raw const IDT as u64;
@@ -483,6 +496,9 @@ pub fn init() {
 
         // IRQ0 (timer) - no IST (ist=0), DPL=0
         IDT[32] = IdtEntry::interrupt_gate(timer_handler as *const () as u64, 0x08, 0x00, 0);
+
+        // IRQ1 (keyboard) - no IST (ist=0), DPL=0
+        IDT[33] = IdtEntry::interrupt_gate(keyboard_handler as *const () as u64, 0x08, 0x00, 0);
 
         // LAPIC Timer (vector 240 / 0xF0) - no IST, DPL=0
         IDT[240] = IdtEntry::interrupt_gate(lapic_timer_handler as *const () as u64, 0x08, 0x00, 0);
@@ -524,6 +540,7 @@ pub fn init() {
 /// - Enable the APIC via SVR register
 /// - Configure LVT LINT0 for PIC IRQ0 passthrough (ExtINT mode)
 /// - Mask LINT1 (we don't use it)
+#[allow(static_mut_refs)]
 pub fn init_local_apic_with_hhdm() {
     // Verify HHDM offset is set before proceeding
     unsafe {
@@ -619,6 +636,7 @@ const APIC_TCR_DIV_128: u32 = 0xB;
 ///
 /// The LVT Timer is programmed for periodic mode at the specified frequency.
 /// The Local APIC timer runs at the processor's crystal clock (typically 1-3 GHz).
+#[allow(static_mut_refs)]
 pub fn init_lapic_timer(hz: u32) {
     unsafe {
         if HHDM_OFFSET == 0 {
@@ -662,13 +680,24 @@ pub fn init_lapic_timer(hz: u32) {
         crate::serial::write_byte(b'0' + ((hz / 1000) % 10) as u8);
         crate::serial::write_byte(b'k');
     } else {
-        // Print 3-digit Hz value (or less with leading zeros)
-        let hundreds = (hz / 100) as u8;
-        let tens = ((hz / 10) % 10) as u8;
-        let ones = (hz % 10) as u8;
-        crate::serial::write_byte(b'0' + (hundreds >> 2)); // First digit
-        crate::serial::write_byte(b'0' + tens);            // Second digit
-        crate::serial::write_byte(b'0' + ones);            // Third digit
+        // Print Hz value as decimal
+        let mut temp = hz;
+        let mut buf = [0u8; 4];
+        let mut idx = 3;
+        if temp == 0 {
+            buf[3] = b'0';
+            idx = 3;
+        } else {
+            while temp > 0 {
+                buf[idx] = b'0' + (temp % 10) as u8;
+                temp /= 10;
+                idx -= 1;
+            }
+            idx += 1;
+        }
+        for &b in &buf[idx..] {
+            crate::serial::write_byte(b);
+        }
     }
     crate::serial::write_str_safe(" Hz, initial_count=");
     write_u32_hex(initial_count);

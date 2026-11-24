@@ -27,16 +27,6 @@ const fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
 }
 
-/// Initialize the kernel heap by mapping its virtual address range.
-/// Must be called BEFORE any heap allocations.
-pub fn init() -> Result<(), &'static str> {
-    crate::paging::map_range(
-        HEAP_START,
-        HEAP_SIZE as u64,
-        crate::paging::PRESENT | crate::paging::WRITABLE | crate::paging::NO_EXECUTE,
-    )
-}
-
 /// Free block header in the linked list
 #[repr(C)]
 struct FreeBlock {
