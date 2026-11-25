@@ -294,7 +294,7 @@ pub extern "x86-interrupt" fn double_fault_handler(stack_frame: InterruptStackFr
 
 /// General Protection Fault handler (#GP, vector 13)
 #[unsafe(no_mangle)]
-pub extern "x86-interrupt" fn gp_handler(stack_frame: InterruptStackFrame, _error_code: u64) {
+pub extern "x86-interrupt" fn gp_handler(stack_frame: InterruptStackFrame, _error_code: u64) -> ! {
     crate::serial::write_str_safe("#GP: RIP=0x\r\n");
     let mut rip = stack_frame.instruction_pointer;
     let mut buf = [0u8; 16];
@@ -305,12 +305,13 @@ pub extern "x86-interrupt" fn gp_handler(stack_frame: InterruptStackFrame, _erro
     }
     crate::serial::write_str_safe(core::str::from_utf8(&buf).unwrap());
     crate::serial::write_str_safe("\r\n");
+    halt_system();
 }
 
 /// Page Fault handler (#PF, vector 14)
 /// Prints CR2 (faulting address) and error code
 #[unsafe(no_mangle)]
-pub extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, _error_code: u64) {
+pub extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFrame, _error_code: u64) -> ! {
     let cr2: u64;
     unsafe {
         core::arch::asm!(
@@ -340,7 +341,7 @@ pub extern "x86-interrupt" fn page_fault_handler(stack_frame: InterruptStackFram
     crate::serial::write_str_safe(core::str::from_utf8(&buf).unwrap());
     crate::serial::write_str_safe("\r\n");
 
-    halt_system();
+    halt_system()
 }
 
 /// Timer interrupt handler (IRQ 0, vector 32)
@@ -362,12 +363,20 @@ pub extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame
 
 /// Local APIC Timer interrupt handler (vector 240 / 0xF0)
 /// Called by LAPIC timer configured via init_lapic_timer()
+/// Calls the scheduler to potentially switch to a different thread
 #[unsafe(no_mangle)]
-pub extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: InterruptStackFrame) {
+pub extern "x86-interrupt" fn lapic_timer_handler(stack_frame: InterruptStackFrame) {
     // Acknowledge the interrupt by writing to EOI register
     // This is REQUIRED for Local APIC timer interrupts
     apic_write(0xB0, 0);
     increment_ticks();
+
+    // Call the scheduler's timer tick handler to potentially yield
+    // Pass the current RSP (pointing past the InterruptStackFrame)
+    // The stack_frame is at RSP, sizeof(InterruptStackFrame) = 48 bytes
+    // So RSP + 48 points to where the "return address" would be
+    let current_rsp = (&stack_frame as *const _ as u64).wrapping_add(core::mem::size_of::<InterruptStackFrame>() as u64);
+    crate::scheduler::on_timer_tick(current_rsp);
 }
 
 /// Default handler for unexpected interrupts

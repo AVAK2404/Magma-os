@@ -114,18 +114,26 @@ pub fn init() -> Result<(), &'static str> {
 }
 
 /// Find a mount point by path with proper boundary matching
+/// Uses ASCII case-insensitive matching for FAT32 compatibility
 fn find_mount(path: &str) -> Option<(usize, &str)> {
     unsafe {
         for i in 0..MOUNT_COUNT {
             if let Some(mount) = &MOUNTS[i] {
-                // Check for exact match first
-                if path == mount.path {
-                    return Some((i, &path[mount.path.len()..])); // Empty relative path
+                let mount_len = mount.path.len();
+
+                // Check for exact case-insensitive match first
+                if path.eq_ignore_ascii_case(&mount.path) {
+                    return Some((i, &path[mount_len..])); // Empty relative path
                 }
-                // Check if path starts with mount path followed by '/' for proper boundary matching
-                if path.starts_with(&mount.path) && (path.len() == mount.path.len() || path.as_bytes().get(mount.path.len()) == Some(&b'/')) {
-                    let relative_path = &path[mount.path.len()..];
-                    return Some((i, relative_path));
+
+                // Check if path starts with mount path (case-insensitive) followed by '/' for proper boundary matching
+                if path.len() > mount_len && path.as_bytes().get(mount_len) == Some(&b'/') {
+                    // Verify the prefix matches case-insensitively
+                    let path_prefix = &path[..mount_len];
+                    if path_prefix.eq_ignore_ascii_case(&mount.path) {
+                        let relative_path = &path[mount_len..];
+                        return Some((i, relative_path));
+                    }
                 }
             }
         }

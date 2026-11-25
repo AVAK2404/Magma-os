@@ -241,8 +241,8 @@ fn identify_drive(base: u16) -> Option<DriveInfo> {
         return None;
     }
 
-    // Select master drive (bit 6 = 0 for master, bit 7 = 1)
-    outb(base + IDE_DRIVE_PORT, 0xA0);
+    // Select master drive and LBA mode (bit 7=1 for LBA, bit 6=0 for master)
+    outb(base + IDE_DRIVE_PORT, 0xE0);
 
     // 400ns delay after drive select
     io_wait_400ns();

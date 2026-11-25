@@ -1,10 +1,12 @@
 //! SpinLock synchronization primitive for no_std kernel
 //! Uses AtomicBool for lock state with Acquire/Release ordering
+//! Provides interrupt-safe locking via without_interrupts()
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::ops::{Deref, DerefMut};
 use core::hint::spin_loop;
+use core::arch::asm;
 
 /// A simple spinlock that protects mutable data
 pub struct SpinLock<T> {
@@ -47,6 +49,28 @@ where
     fn default() -> Self {
         Self::new(T::default())
     }
+}
+
+/// Execute a closure while interrupts are disabled.
+/// Saves RFLAGS, disables interrupts (cli), executes f, then restores RFLAGS.
+/// This is used for interrupt-safe locking - the SpinLock's lock() method
+/// can deadlock if a timer interrupt fires while we hold the lock.
+pub fn without_interrupts<R, F: FnOnce() -> R>(f: F) -> R {
+    // Save RFLAGS and disable interrupts
+    let flags: u64;
+    unsafe {
+        asm!("pushf; pop {0}", out(reg) flags, options(nomem, nostack));
+        asm!("cli", options(nomem, nostack));
+    }
+
+    let result = f();
+
+    // Restore RFLAGS (which may re-enable interrupts if they were enabled)
+    unsafe {
+        asm!("push {0}; popfq", in(reg) flags, options(nomem, nostack));
+    }
+
+    result
 }
 
 /// Guard returned by SpinLock::lock()

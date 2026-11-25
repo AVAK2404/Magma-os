@@ -17,6 +17,7 @@ mod keyboard;
 mod panic;
 mod paging;
 mod pmm;
+mod scheduler;
 mod pci;
 mod serial;
 mod splash;
@@ -25,6 +26,7 @@ mod vfs;
 
 use alloc::{boxed::Box, format, string::String, string::ToString, vec::Vec};
 use core::arch::asm;
+use core::sync::atomic::Ordering;
 use limine::{BaseRevision, RequestsEndMarker, RequestsStartMarker};
 use limine::request::FramebufferRequest;
 use limine::request::HhdmRequest;
@@ -69,6 +71,10 @@ static ALLOCATOR: heap::LockedHeap = heap::LockedHeap::empty();
 /// Current working directory for the shell (max 256 chars)
 static mut CURRENT_DIR_BUF: [u8; 256] = [0; 256];
 static mut CURRENT_DIR_LEN: usize = 0;
+
+/// Worker thread counters for Phase 1E verification
+static WORKER_A_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WORKER_B_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Get current directory as a static str
 fn get_current_dir() -> &'static str {
@@ -251,7 +257,28 @@ pub extern "C" fn _start() -> ! {
         ioapic::route_isa_irq(1, 33, 0);
         serial::write_str_safe("[OK] PS/2 Keyboard routed via I/O APIC (IRQ1 -> vec 33)\r\n");
 
-        // Initialize Local APIC timer at 100 Hz (same as PIT for consistency)
+        // ============================================
+        // Phase 1E: Initialize Scheduler and Thread Support
+        // ============================================
+        // Initialize scheduler with idle thread (TID 0) FIRST
+        // This must happen before LAPIC timer is enabled to prevent #GP on first tick
+        scheduler::init();
+        serial::write_str_safe("[OK] Scheduler initialized with idle thread\r\n");
+
+        // Spawn worker threads kworker-a and kworker-b
+        if let Some(tid) = scheduler::spawn_thread(kworker_a) {
+            serial::write_str_safe("[OK] Spawned worker thread 'kworker-a' (TID=");
+            print_u64(tid as u64);
+            serial::write_str_safe(")\r\n");
+        }
+        if let Some(tid) = scheduler::spawn_thread(kworker_b) {
+            serial::write_str_safe("[OK] Spawned worker thread 'kworker-b' (TID=");
+            print_u64(tid as u64);
+            serial::write_str_safe(")\r\n");
+        }
+
+        // Initialize Local APIC timer at 100 Hz (AFTER scheduler is ready)
+        // This must happen AFTER scheduler init because timer interrupts fire immediately
         interrupts::init_lapic_timer(100);
         serial::write_str_safe("[OK] Local APIC timer calibrated at 100 Hz\r\n");
 
@@ -496,6 +523,28 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // ============================================
+    // Phase 1E Boot Verification Test
+    // ============================================
+    // Yield a few times to let worker threads run
+    for _ in 0..100 {
+        scheduler::yield_cpu();
+    }
+
+    // Read worker thread counters
+    let worker_a_count = WORKER_A_COUNT.load(Ordering::Relaxed);
+    let worker_b_count = WORKER_B_COUNT.load(Ordering::Relaxed);
+
+    // Verify both workers have run at least once
+    assert!(worker_a_count > 0, "Worker A did not run");
+    assert!(worker_b_count > 0, "Worker B did not run");
+
+    serial::write_str_safe("[OK] Phase 1E scheduler verified (worker-a=");
+    print_u64(worker_a_count);
+    serial::write_str_safe(", worker-b=");
+    print_u64(worker_b_count);
+    serial::write_str_safe(")\r\n");
+
     // Initialize current directory
     set_current_dir("/");
 
@@ -637,6 +686,8 @@ fn print_help() {
     serial::write_str_safe("  shutdown    - Shutdown the system\r\n");
     serial::write_str_safe("  fence-test  - Test write fencing\r\n");
     serial::write_str_safe("  exit/quit   - Exit shell and halt\r\n");
+    serial::write_str_safe("  threads     - Show thread statistics\r\n");
+    serial::write_str_safe("  yield       - Voluntarily yield the CPU\r\n");
     serial::write_str_safe("\r\n");
 }
 
@@ -1175,6 +1226,71 @@ fn cmd_pwd() {
     }
 }
 
+/// Show thread statistics
+fn cmd_threads() {
+    serial::write_str_safe("\r\nThread Statistics:\r\n");
+    serial::write_str_safe("  Total threads: ");
+    print_u64(scheduler::thread_count() as u64);
+    serial::write_str_safe("\r\n");
+    serial::write_str_safe("  Ready threads: ");
+    print_u64(scheduler::ready_count() as u64);
+    serial::write_str_safe("\r\n");
+
+    // Show each active thread's TID and state
+    for tid in 0..scheduler::MAX_THREADS {
+        let state = scheduler::get_thread_state(tid);
+        if state != scheduler::ThreadState::Terminated {
+            serial::write_str_safe("  Thread ");
+            print_u64(tid as u64);
+            serial::write_str_safe(": ");
+            match state {
+                scheduler::ThreadState::Ready => serial::write_str_safe("Ready"),
+                scheduler::ThreadState::Running => serial::write_str_safe("Running"),
+                scheduler::ThreadState::Blocked => serial::write_str_safe("Blocked"),
+                scheduler::ThreadState::Terminated => serial::write_str_safe("Terminated"),
+            }
+            serial::write_str_safe("\r\n");
+        }
+    }
+
+    // Show live worker thread counts
+    let worker_a = WORKER_A_COUNT.load(Ordering::Relaxed);
+    let worker_b = WORKER_B_COUNT.load(Ordering::Relaxed);
+    serial::write_str_safe("  Worker A count: ");
+    print_u64(worker_a);
+    serial::write_str_safe("\r\n");
+    serial::write_str_safe("  Worker B count: ");
+    print_u64(worker_b);
+    serial::write_str_safe("\r\n");
+}
+
+/// Yield the CPU voluntarily
+fn cmd_yield() {
+    serial::write_str_safe("\r\nYielding CPU...\r\n");
+    scheduler::yield_cpu();
+    serial::write_str_safe("Resumed after yield.\r\n");
+}
+
+/// Worker thread A - runs continuously with atomic counter
+fn kworker_a() -> ! {
+    loop {
+        WORKER_A_COUNT.fetch_add(1, Ordering::Relaxed);
+        for _ in 0..10 {
+            scheduler::yield_cpu();
+        }
+    }
+}
+
+/// Worker thread B - runs continuously with atomic counter
+fn kworker_b() -> ! {
+    loop {
+        WORKER_B_COUNT.fetch_add(1, Ordering::Relaxed);
+        for _ in 0..10 {
+            scheduler::yield_cpu();
+        }
+    }
+}
+
 /// Interactive command loop
 fn interactive_loop() -> ! {
     loop {
@@ -1229,6 +1345,10 @@ fn interactive_loop() -> ! {
             cmd_reboot();
         } else if starts_with(trimmed, b"shutdown") {
             cmd_shutdown();
+        } else if starts_with(trimmed, b"threads") {
+            cmd_threads();
+        } else if starts_with(trimmed, b"yield") {
+            cmd_yield();
         } else if starts_with(trimmed, b"exit") || starts_with(trimmed, b"quit") {
             serial::write_str_safe("Goodbye.\r\n");
             break;

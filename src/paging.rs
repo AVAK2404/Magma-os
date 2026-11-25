@@ -202,13 +202,15 @@ pub fn map_huge_page(virt_addr: u64, phys_addr: u64, flags: u64) -> Result<(), &
             if (pdpt[pdpt_index] & HUGE_PAGE) != 0 {
                 return Err("PDPT entry is already a 1 GiB huge page");
             }
-            // PDPT entry points to a PD table - use the existing one
+            // PDPT entry points to a PD table - ensure it has WRITABLE flag
             let pd_phys = pdpt[pdpt_index] & ADDR_MASK;
+            // Ensure PDPT entry has WRITABLE flag for kernel access
+            pdpt[pdpt_index] = pdpt[pdpt_index] | WRITABLE;
             let pd_virt = hhdm + pd_phys;
             let pd = core::slice::from_raw_parts_mut(pd_virt as *mut u64, 512);
 
             // 3. Set 2 MiB huge page entry in PD
-            pd[pd_index] = (phys_addr & ADDR_MASK) | flags | PRESENT | HUGE_PAGE;
+            pd[pd_index] = (phys_addr & ADDR_MASK) | flags | PRESENT | HUGE_PAGE | WRITABLE;
 
             // 4. Invalidate TLB
             invlpg(virt_addr);
@@ -226,7 +228,7 @@ pub fn map_huge_page(virt_addr: u64, phys_addr: u64, flags: u64) -> Result<(), &
         let pd = core::slice::from_raw_parts_mut(pd_virt as *mut u64, 512);
 
         // 5. Set 2 MiB huge page entry in PD
-        pd[pd_index] = (phys_addr & ADDR_MASK) | flags | PRESENT | HUGE_PAGE;
+        pd[pd_index] = (phys_addr & ADDR_MASK) | flags | PRESENT | HUGE_PAGE | WRITABLE;
 
         // 6. Invalidate TLB
         invlpg(virt_addr);
