@@ -46,7 +46,7 @@ const APIC_SVR_VECTOR: u32 = 0x60;         // Vector 96 for spurious interrupts
 /// LVT LINT0 for PIC IRQ0 passthrough (ExtINT mode)
 /// LVT LINT0 register layout at offset 0x350:
 /// - Bits 0-7: Vector (32 for timer/IRQ0)
-/// - Bit 8: Mask (0 = unmasked)
+/// - Bit 16: Mask (0 = unmasked)
 /// - Bits 9-11: Delivery mode (111 = ExtINT)
 /// - Value 0x00000700: Vector 0 unmasked, ExtINT delivery mode
 const APIC_LINT0_EXTINT: u32 = 0x0000_0700;  // ExtINT delivery mode for PIC IRQ0 passthrough
@@ -364,8 +364,9 @@ pub extern "x86-interrupt" fn keyboard_handler(_stack_frame: InterruptStackFrame
 /// Called by LAPIC timer configured via init_lapic_timer()
 #[unsafe(no_mangle)]
 pub extern "x86-interrupt" fn lapic_timer_handler(_stack_frame: InterruptStackFrame) {
-    // Write EOVI (End of Interrupt to Local Vector Table)
-    // No EOI needed for timer - interrupt is level-triggered automatically
+    // Acknowledge the interrupt by writing to EOI register
+    // This is REQUIRED for Local APIC timer interrupts
+    apic_write(0xB0, 0);
     increment_ticks();
 }
 
@@ -428,9 +429,28 @@ fn remap_pic() {
     // Slave PIC mask: all IRQs masked (IRQ8-15)
     outb(PIC2_DATA, 0xFF);
 
-    // Send clear commands
+    // Send initial interrupt clear commands
     outb(PIC_COMMAND, 0x20);
     outb(PIC2_COMMAND, 0x20);
+}
+
+/// Mask IRQ0 on PIC to prevent conflicts with Local APIC timer
+/// Call this after init_lapic_timer() to disable PIC timer while using LAPIC timer
+pub fn mask_pic_timer() {
+    // First, disable ExtINT pass-through on LAPIC LINT0
+    // LVT LINT0 register layout:
+    // - Bits 0-7: Vector number
+    // - Bit 16: Mask (1 = masked)
+    // - Bits 9-11: Delivery mode (000=Fixed, 111=ExtINT)
+    // Value 0x000100FF: Vector 0xFF, Fixed mode, Masked (bit 16 = 1)
+    apic_write(APIC_LVT_LINT0, 0x0001_00FF);
+
+    // Mask IRQ0 (timer) on master PIC
+    // Bit 0 = IRQ0, set to 1 to mask
+    outb(PIC_DATA, 0xFF);
+
+    // Send EOI to clear any in-service interrupt
+    outb(PIC_COMMAND, 0x20);
 }
 
 // ============================================================================
@@ -584,7 +604,7 @@ pub fn init_local_apic_with_hhdm() {
 
     // Mask LINT1 (not used)
     // Delivery mode: Fixed, Vector: 0xFF (masked)
-    apic_write(APIC_LVT_LINT1, (0xFF) | (1 << 7));  // Masked, vector 0xFF
+    apic_write(APIC_LVT_LINT1, (0xFF) | (1 << 16));  // Masked, vector 0xFF (bit 16 = mask)
 
     // Configure LINT0 for PIC IRQ0 passthrough (ExtINT mode)
     // This allows the PIC to forward IRQ0 to the Local APIC
@@ -613,10 +633,10 @@ const APIC_DCR: u64 = 0x3E0;      // Division Configuration Register
 
 /// Local APIC Timer flags (LVT Timer register)
 /// Bits 17-16: Timer Mode (00=Fixed, 01=Periodic, 10=One-shot, 11=Express)
-/// Bit 16: Interrupt Mask (0=unmasked, 1=mocked)
+/// Bit 16: Interrupt Mask (0=unmasked, 1=masked)
 /// Bits 7-0: Vector number
-const APIC_TMR_PERIODIC: u32 = 0 << 17;  // Periodic mode
-const APIC_LVTT_MASKED: u32 = 1 << 16;   // Mask bit
+const APIC_TMR_PERIODIC: u32 = 1 << 17;  // Periodic mode (bits 17-16 = 01b)
+const APIC_LVTT_MASKED: u32 = 1 << 16;    // Mask bit (bit 16)
 
 /// Local APIC Timer divisors (DCR register)
 /// Bits 3-0: Divide-by value
@@ -662,7 +682,7 @@ pub fn init_lapic_timer(hz: u32) {
 
     // Program LVT Timer for periodic mode, unmasked, vector 0xF0 (240)
     // Vector 240 (0xF0) is reserved for our timer ISR
-    // LVT Timer: bits 7-0 = vector, bit 17 = periodic mode (0), bit 16 = masked (0)
+    // LVT Timer: bits 7-0 = vector, bits 17-16 = periodic mode (01), bit 8 = masked (0)
     let lvt_timer_value = APIC_TMR_PERIODIC | (240 << 0);
 
     // Set division ratio (use divide-by-1 for simplicity)

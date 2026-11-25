@@ -128,7 +128,7 @@ pub fn route_isa_irq(isa_irq: u8, vector: u8, dest_apic_id: u8) {
     // Construct Redirection Table Entry:
     // Low bits (vector, delivery mode, mask)
     // - Bits 0-7: Vector number
-    // - Bit 8: Mask (0 = unmasked)
+    // - Bit 16: Mask (0 = unmasked)
     // - Bits 10-11: Delivery mode (00 = Fixed)
     // - Bits 13-15: Reserved/Level/Polarity
     let low = (vector as u32) | (1 << 10);  // Vector + Fixed delivery mode

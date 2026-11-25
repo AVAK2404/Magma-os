@@ -410,33 +410,44 @@ pub fn region_type_at(phys_addr: u64) -> Option<RegionType> {
 /// `align_bytes` must be a power of 2, defaults to PAGE_SIZE (4 KiB) if 0
 #[allow(dead_code)]
 pub fn alloc_contiguous_frames(count: usize, align_bytes: u64) -> Option<DmaRegion> {
-    // If align_bytes is 0, use PAGE_SIZE as default
-    let align = if align_bytes == 0 { PAGE_SIZE } else { align_bytes };
+    // If align_bytes is 0 or 1 (invalid), use PAGE_SIZE as default
+    let align = if align_bytes <= 1 { PAGE_SIZE } else { align_bytes };
 
     // Convert byte alignment to frame alignment
     // For 2 MiB alignment (2 * 1024 * 1024), we need 512 frames
-    let align_frames = (align / PAGE_SIZE) as usize;
+    // Ensure at least 1 frame alignment to avoid division by zero
+    let align_frames = ((align + PAGE_SIZE - 1) / PAGE_SIZE) as usize;
+    if align_frames == 0 {
+        return None;
+    }
 
-    allocate_aligned_contiguous(count, align_frames)
+    let mut state = BITMAP_STATE.lock();
+    allocate_aligned_contiguous(count, align_frames, &mut *state)
 }
 
-/// Internal function to allocate contiguous frames with frame-level alignment
-fn allocate_aligned_contiguous(count: usize, align_frames: usize) -> Option<DmaRegion> {
+/// Allocate contiguous frames with byte-level alignment
+/// Ensures the starting physical address satisfies `phys_addr % align_bytes == 0`
+/// This is the public interface for aligned contiguous allocation
+pub fn alloc_aligned_contiguous(count: usize, align_bytes: u64) -> Option<DmaRegion> {
+    alloc_contiguous_frames(count, align_bytes)
+}
+
+/// Internal function to allocate contiguous frames without alignment requirement
+/// Takes a mutable reference to avoid re-locking the spinlock
+fn allocate_contiguous_frames(count: usize, state: &mut BitmapState) -> Option<DmaRegion> {
     unsafe {
-        let mut state = BITMAP_STATE.lock();
 
         if state.free_frames < count || state.data.is_null() {
             return None;
         }
 
-        // Search for contiguous free frames that satisfy alignment
+        // Search for contiguous free frames
         let mut consecutive_free = 0usize;
         let mut candidate_start: Option<usize> = None;
 
         for byte_idx in 0..state.size {
             let byte = *state.data.add(byte_idx);
 
-            // Check each bit in the byte
             for bit_idx in 0..8 {
                 let frame_idx = byte_idx * 8 + bit_idx;
                 if frame_idx >= state.total_frames {
@@ -452,33 +463,8 @@ fn allocate_aligned_contiguous(count: usize, align_frames: usize) -> Option<DmaR
                     consecutive_free += 1;
 
                     if consecutive_free >= count {
-                        // Found enough contiguous frames
                         let start_frame = candidate_start.unwrap();
-
-                        // Align start to align_frames if needed
-                        if align_frames > 1 && start_frame % align_frames != 0 {
-                            // Calculate aligned start within this region
-                            let misaligned_offset = start_frame % align_frames;
-                            let aligned_start = start_frame + (align_frames - misaligned_offset);
-
-                            // Check if we have enough frames after alignment
-                            if aligned_start + count <= start_frame + consecutive_free {
-                                // Use aligned version - mark exactly 'count' frames
-                                if mark_frames_allocated(&mut state, aligned_start, aligned_start + count) {
-                                    let phys_addr = (aligned_start as u64) * PAGE_SIZE;
-                                    let virt_addr = phys_addr + state.hhdm_offset;
-                                    return Some(DmaRegion {
-                                        phys_addr,
-                                        virt_addr,
-                                        frame_count: count,
-                                    });
-                                }
-                            }
-                        }
-
-                        // No alignment needed or alignment couldn't be satisfied within this region
-                        // Fall back to using the un-aligned region
-                        if mark_frames_allocated(&mut state, start_frame, start_frame + count) {
+                        if mark_frames_allocated(&mut *state, start_frame, start_frame + count) {
                             let phys_addr = (start_frame as u64) * PAGE_SIZE;
                             let virt_addr = phys_addr + state.hhdm_offset;
                             return Some(DmaRegion {
@@ -489,13 +475,84 @@ fn allocate_aligned_contiguous(count: usize, align_frames: usize) -> Option<DmaR
                         }
                     }
                 } else {
-                    // Reset on allocated frame
                     consecutive_free = 0;
                     candidate_start = None;
                 }
             }
         }
 
+        None
+    }
+}
+
+/// Internal function to allocate contiguous frames with frame-level alignment
+/// Takes a mutable reference to avoid re-locking the spinlock
+fn allocate_aligned_contiguous(count: usize, align_frames: usize, state: &mut BitmapState) -> Option<DmaRegion> {
+    unsafe {
+
+        if state.free_frames < count || state.data.is_null() {
+            return None;
+        }
+
+        // For aligned allocation, we need to find a region where:
+        // 1. The start frame is a multiple of align_frames
+        // 2. There are at least count contiguous free frames starting there
+
+        // If align_frames is 1, no alignment needed - use regular contiguous allocation
+        if align_frames == 1 {
+            return allocate_contiguous_frames(count, &mut *state);
+        }
+
+        // Search for aligned contiguous free frames
+        // Start from the first aligned frame and check in steps of align_frames
+        let mut start_frame = 0;
+        while start_frame + count <= state.total_frames {
+            // Skip to next aligned boundary
+            if start_frame % align_frames != 0 {
+                start_frame = ((start_frame / align_frames) + 1) * align_frames;
+                if start_frame >= state.total_frames {
+                    break;
+                }
+            }
+
+            // Check if frames [start_frame, start_frame + count) are all free
+            let mut all_free = true;
+            for offset in 0..count {
+                let frame_to_check = start_frame + offset;
+                if frame_to_check >= state.total_frames {
+                    all_free = false;
+                    break;
+                }
+                let byte_idx = frame_to_check / 8;
+                let bit_idx = frame_to_check % 8;
+                if byte_idx >= state.size {
+                    all_free = false;
+                    break;
+                }
+                let byte = *state.data.add(byte_idx);
+                if (byte & (1 << bit_idx)) != 0 {
+                    all_free = false;
+                    break;
+                }
+            }
+
+            if all_free {
+                // Found aligned contiguous free frames
+                if mark_frames_allocated(&mut *state, start_frame, start_frame + count) {
+                    let phys_addr = (start_frame as u64) * PAGE_SIZE;
+                    let virt_addr = phys_addr + state.hhdm_offset;
+                    return Some(DmaRegion {
+                        phys_addr,
+                        virt_addr,
+                        frame_count: count,
+                    });
+                }
+            }
+
+            start_frame += align_frames;
+        }
+
+        // No suitable aligned region found
         None
     }
 }

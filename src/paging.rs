@@ -190,7 +190,7 @@ pub fn map_huge_page(virt_addr: u64, phys_addr: u64, flags: u64) -> Result<(), &
             pml4[pml4_index] & ADDR_MASK
         } else {
             let new_frame = pmm::alloc_frame().ok_or("Failed to allocate PDPT frame")?;
-            pml4[pml4_index] = new_frame | PRESENT | WRITABLE | NO_EXECUTE;
+            pml4[pml4_index] = new_frame | PRESENT | WRITABLE | USER;
             new_frame
         };
         let pdpt_virt = hhdm + pdpt_phys;
@@ -203,21 +203,32 @@ pub fn map_huge_page(virt_addr: u64, phys_addr: u64, flags: u64) -> Result<(), &
                 return Err("PDPT entry is already a 1 GiB huge page");
             }
             // PDPT entry points to a PD table - use the existing one
-        } else {
-            // Allocate new PD table
-            let new_frame = pmm::alloc_frame().ok_or("Failed to allocate PD frame")?;
-            pdpt[pdpt_index] = new_frame | PRESENT | WRITABLE | NO_EXECUTE;
+            let pd_phys = pdpt[pdpt_index] & ADDR_MASK;
+            let pd_virt = hhdm + pd_phys;
+            let pd = core::slice::from_raw_parts_mut(pd_virt as *mut u64, 512);
+
+            // 3. Set 2 MiB huge page entry in PD
+            pd[pd_index] = (phys_addr & ADDR_MASK) | flags | PRESENT | HUGE_PAGE;
+
+            // 4. Invalidate TLB
+            invlpg(virt_addr);
+
+            return Ok(());
         }
 
-        // 3. Get PD physical address (extract from PDPT entry)
+        // 3. Allocate new PD table
+        let new_frame = pmm::alloc_frame().ok_or("Failed to allocate PD frame")?;
+        pdpt[pdpt_index] = new_frame | PRESENT | WRITABLE | USER;
+
+        // 4. Get PD physical address (extract from PDPT entry)
         let pd_phys = pdpt[pdpt_index] & ADDR_MASK;
         let pd_virt = hhdm + pd_phys;
         let pd = core::slice::from_raw_parts_mut(pd_virt as *mut u64, 512);
 
-        // 4. Set 2 MiB huge page entry in PD
+        // 5. Set 2 MiB huge page entry in PD
         pd[pd_index] = (phys_addr & ADDR_MASK) | flags | PRESENT | HUGE_PAGE;
 
-        // 5. Invalidate TLB
+        // 6. Invalidate TLB
         invlpg(virt_addr);
 
         Ok(())

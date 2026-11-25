@@ -286,9 +286,7 @@ const KB_COMMAND_PORT: u16 = 0x64;
 /// Read the Controller Command/Status byte from port 0x60 (after reading status 0x64)
 fn read_ccb() -> Option<u8> {
     // Command: 0x20 = Read CCB
-    unsafe {
-        outb(KB_COMMAND_PORT, 0x20);
-    }
+    outb(KB_COMMAND_PORT, 0x20);
     // Wait for output buffer to have data (up to 100 microseconds)
     for _ in 0..100 {
         if inb(KB_STATUS_PORT) & 0x01 != 0 {
@@ -305,15 +303,11 @@ fn write_ccb(value: u8) -> bool {
     for _ in 0..100 {
         if inb(KB_STATUS_PORT) & 0x02 == 0 {
             // Command: 0x60 = Write CCB
-            unsafe {
-                outb(KB_COMMAND_PORT, 0x60);
-            }
+            outb(KB_COMMAND_PORT, 0x60);
             // Wait for input buffer to be empty again before writing data
             for _ in 0..100 {
                 if inb(KB_STATUS_PORT) & 0x02 == 0 {
-                    unsafe {
-                        outb(KB_DATA_PORT, value);
-                    }
+                    outb(KB_DATA_PORT, value);
                     return true;
                 }
                 core::hint::spin_loop();
